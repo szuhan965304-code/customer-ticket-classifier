@@ -19,14 +19,16 @@ def jieba_tokenizer(text: str):
 
 
 # ===============================
-# 2️⃣ 因為 app.py 在 models 裡
-#    所以模型就在同一層
+# 2️⃣ 路徑設定（雲端最穩）
+# app.py 在 repo root
+# 模型在 models/ 資料夾
 # ===============================
 BASE_DIR = Path(__file__).resolve().parent
+MODELS_DIR = BASE_DIR / "models"
 
 MODEL_FILES = {
-    "SVM (LinearSVC)": BASE_DIR / "svm_tfidf.joblib",
-    "Logistic Regression": BASE_DIR / "logistic_tfidf.joblib",
+    "SVM (LinearSVC)": MODELS_DIR / "svm_tfidf.joblib",
+    "Logistic Regression": MODELS_DIR / "logistic_tfidf.joblib",
 }
 
 
@@ -70,9 +72,11 @@ def softmax(z):
 
 # ===============================
 # 5️⃣ 快取模型
+# Streamlit cache 用 str 路徑當 key 更穩
 # ===============================
 @st.cache_resource
-def load_model(path: Path):
+def load_model(path_str: str):
+    path = Path(path_str)
     if not path.exists():
         raise FileNotFoundError(f"找不到模型檔：{path}")
     return joblib.load(path)
@@ -88,6 +92,7 @@ def predict_with_confidence(model, text: str):
     top_df = None
     labels = None
 
+    # LogisticRegression 通常有 predict_proba
     if hasattr(model, "predict_proba"):
         proba = model.predict_proba([text])[0]
         labels = model.classes_
@@ -98,10 +103,12 @@ def predict_with_confidence(model, text: str):
             .reset_index(drop=True)
         )
 
+    # LinearSVC 常用 decision_function
     elif hasattr(model, "decision_function"):
         scores = model.decision_function([text])
         scores = np.array(scores)
 
+        # binary
         if scores.ndim == 1:
             margin = float(scores[0])
             p_pos = 1 / (1 + math.exp(-margin))
@@ -115,6 +122,7 @@ def predict_with_confidence(model, text: str):
                 .reset_index(drop=True)
             )
         else:
+            # multiclass
             raw = scores[0]
             probs = softmax(raw)
             labels = model.classes_
@@ -135,14 +143,25 @@ def main():
     st.set_page_config(page_title="Customer Ticket NLP", layout="centered")
     st.title("客服工單分類（TF-IDF + ML）")
 
+    # ✅ Debug / health check
     with st.expander("環境檢查"):
-        st.write("BASE_DIR:", BASE_DIR)
+        st.write("BASE_DIR:", str(BASE_DIR))
+        st.write("MODELS_DIR:", str(MODELS_DIR), "exists =", MODELS_DIR.exists())
+
+        if MODELS_DIR.exists():
+            try:
+                st.write("models files:", [p.name for p in MODELS_DIR.iterdir()])
+            except Exception as e:
+                st.write("list models error:", e)
+
         for k, p in MODEL_FILES.items():
             st.write(f"{k} -> {p} exists = {p.exists()}")
 
+    # ✅ Choose model
     model_choice = st.radio("選擇模型", list(MODEL_FILES.keys()), horizontal=True)
     model_path = MODEL_FILES[model_choice]
 
+    # ✅ Threshold
     threshold = st.slider(
         "信心門檻（低於門檻顯示：不確定）",
         min_value=0.20,
@@ -151,8 +170,14 @@ def main():
         step=0.01,
     )
 
-    text = st.text_area("輸入一句客服內容", height=120)
+    # ✅ Input
+    text = st.text_area(
+        "輸入一句客服內容",
+        height=120,
+        placeholder="例如：我要退貨 / 商品有瑕疵 / 一直沒收到貨...",
+    )
 
+    # ✅ Predict
     if st.button("預測"):
         try:
             text = clean_text(text)
@@ -161,8 +186,7 @@ def main():
                 st.warning(f"⚠️ 無法判斷：{reason}")
                 return
 
-            model = load_model(model_path)
-
+            model = load_model(str(model_path))
             pred, conf, top_df = predict_with_confidence(model, text)
 
             st.success("✅ 流程成功")
@@ -180,7 +204,7 @@ def main():
                     st.warning("⚠️ 信心偏低，建議補充更多描述")
 
             if top_df is not None:
-                st.subheader("各類別分數")
+                st.subheader("各類別分數（Top 5）")
                 st.dataframe(top_df.head(5), use_container_width=True)
 
         except Exception as e:
