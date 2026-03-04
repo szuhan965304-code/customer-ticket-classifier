@@ -19,14 +19,43 @@ def jieba_tokenizer(text: str):
 
 
 # ===============================
-# 2️⃣ 因為 app.py 在 models 裡
-#    所以模型就在同一層
+# 2️⃣ 路徑處理（雲端最穩）
+# - 允許 app.py 在 root 或 models/
+# - 模型可能在 root 或 models/
 # ===============================
 BASE_DIR = Path(__file__).resolve().parent
 
+# 你的模型檔名（依照你 GitHub 目前檔名）
+SVM_FILENAME = "svm_tfidf.joblib"
+LOG_FILENAME = "logistic_tfidf.joblib"
+
+
+def resolve_model_path(filename: str) -> Path:
+    """
+    在以下位置依序找模型檔（找到就回傳）：
+    1) app.py 同層
+    2) app.py 同層的 models/
+    3) 專案根目錄（BASE_DIR 的上一層）
+    4) 專案根目錄的 models/
+    """
+    candidates = [
+        BASE_DIR / filename,
+        BASE_DIR / "models" / filename,
+        BASE_DIR.parent / filename,
+        BASE_DIR.parent / "models" / filename,
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    # 都找不到就把候選路徑列出來，方便 debug
+    raise FileNotFoundError(
+        "找不到模型檔，已嘗試路徑：\n" + "\n".join(str(c) for c in candidates)
+    )
+
+
 MODEL_FILES = {
-    "SVM (LinearSVC)": BASE_DIR / "svm_tfidf.joblib",
-    "Logistic Regression": BASE_DIR / "logistic_tfidf.joblib",
+    "SVM (LinearSVC)": lambda: resolve_model_path(SVM_FILENAME),
+    "Logistic Regression": lambda: resolve_model_path(LOG_FILENAME),
 }
 
 
@@ -69,10 +98,11 @@ def softmax(z):
 
 
 # ===============================
-# 5️⃣ 快取模型
+# 5️⃣ 快取模型（用 path 字串當 key 比較穩）
 # ===============================
 @st.cache_resource
-def load_model(path: Path):
+def load_model(path_str: str):
+    path = Path(path_str)
     if not path.exists():
         raise FileNotFoundError(f"找不到模型檔：{path}")
     return joblib.load(path)
@@ -102,6 +132,7 @@ def predict_with_confidence(model, text: str):
         scores = model.decision_function([text])
         scores = np.array(scores)
 
+        # binary
         if scores.ndim == 1:
             margin = float(scores[0])
             p_pos = 1 / (1 + math.exp(-margin))
@@ -115,6 +146,7 @@ def predict_with_confidence(model, text: str):
                 .reset_index(drop=True)
             )
         else:
+            # multiclass
             raw = scores[0]
             probs = softmax(raw)
             labels = model.classes_
@@ -136,12 +168,24 @@ def main():
     st.title("客服工單分類（TF-IDF + ML）")
 
     with st.expander("環境檢查"):
-        st.write("BASE_DIR:", BASE_DIR)
-        for k, p in MODEL_FILES.items():
-            st.write(f"{k} -> {p} exists = {p.exists()}")
+        st.write("BASE_DIR:", str(BASE_DIR))
+
+        # 顯示 repo 根目錄大概有哪些檔案（避免雲端黑畫面難查）
+        try:
+            st.write("BASE_DIR files:", [p.name for p in BASE_DIR.iterdir()][:50])
+        except Exception as e:
+            st.write("BASE_DIR list error:", e)
+
+        # 顯示候選模型路徑是否存在
+        for name, getter in MODEL_FILES.items():
+            try:
+                p = getter()
+                st.write(f"{name} -> {p} exists = {p.exists()}")
+            except Exception as e:
+                st.write(f"{name} -> resolve error: {e}")
 
     model_choice = st.radio("選擇模型", list(MODEL_FILES.keys()), horizontal=True)
-    model_path = MODEL_FILES[model_choice]
+    model_path = MODEL_FILES[model_choice]()  # resolve path now
 
     threshold = st.slider(
         "信心門檻（低於門檻顯示：不確定）",
@@ -151,7 +195,7 @@ def main():
         step=0.01,
     )
 
-    text = st.text_area("輸入一句客服內容", height=120)
+    text = st.text_area("輸入一句客服內容", height=120, placeholder="例如：我要退貨 / 商品有瑕疵 / 一直沒收到貨...")
 
     if st.button("預測"):
         try:
@@ -161,7 +205,7 @@ def main():
                 st.warning(f"⚠️ 無法判斷：{reason}")
                 return
 
-            model = load_model(model_path)
+            model = load_model(str(model_path))
 
             pred, conf, top_df = predict_with_confidence(model, text)
 
@@ -180,7 +224,7 @@ def main():
                     st.warning("⚠️ 信心偏低，建議補充更多描述")
 
             if top_df is not None:
-                st.subheader("各類別分數")
+                st.subheader("各類別分數（Top 5）")
                 st.dataframe(top_df.head(5), use_container_width=True)
 
         except Exception as e:
